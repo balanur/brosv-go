@@ -1,0 +1,8 @@
+*.bam
+*.sam
+*.fastq
+*.txt
+*.fq
+*.fasta
+*.fa
+brosv-go
