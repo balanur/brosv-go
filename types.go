@@ -87,3 +87,29 @@ const (
 	leftCI Side = iota + 1
 	rightCI
 )
+
+// FaiEntry is a line from fasta index
+type FaiEntry struct {
+	title     string
+	length    int64
+	offset    int64
+	linebases int
+	linewidth int
+}
+
+// Chromosome title and content
+type Chromosome struct {
+	title   string
+	content string
+}
+
+// Genome : Whole genome consisting of fasta index and chromosome contents
+type Genome struct {
+	faiEntries []FaiEntry
+	chms       []Chromosome
+	chmMap     map[string]int
+}
+
+func (genome *Genome) getChr(title string) Chromosome {
+	return genome.chms[genome.chmMap[title]]
+}
