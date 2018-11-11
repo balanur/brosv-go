@@ -88,6 +88,16 @@ const (
 	rightCI
 )
 
+// SV Type
+type SVType int
+
+const (
+	none SVType = iota
+	del
+	inv
+	tandup
+)
+
 // FaiEntry is a line from fasta index
 type FaiEntry struct {
 	title     string
@@ -112,4 +122,9 @@ type Genome struct {
 
 func (genome *Genome) getChr(title string) Chromosome {
 	return genome.chms[genome.chmMap[title]]
+}
+
+type Loc struct {
+	Pos     int
+	VoteNum int
 }

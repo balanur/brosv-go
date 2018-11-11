@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	MATCH_SCORE         = 16
+	MATCH_SCORE         = 5
 	MISMATCH_SCORE      = -4
 	GAP_OPENING_SCORE   = -16
 	GAP_EXTENSION_SCORE = -1
@@ -16,7 +16,7 @@ type AlignmentResult struct {
 	aL, cL, bL           string
 	aR, bR, cR           string
 	identityL, identityR float64
-	lbp, rbp             int
+	lbp, rbp, pos        int
 }
 
 var MAXSIDE int
@@ -24,8 +24,9 @@ var gapaL, gapbL, gapaR, gapbR, scoreL, scoreR [][]int
 var bestL, bestR []int
 var aL, bL, cL, aR, bR, cR bytes.Buffer
 
-func initAligner() {
-	MAXSIDE := 2000
+func initAligner(N int) {
+	N++
+	MAXSIDE := 100000
 
 	gapaL = make([][]int, MAXSIDE)
 	gapbL = make([][]int, MAXSIDE)
@@ -35,26 +36,34 @@ func initAligner() {
 	gapbR = make([][]int, MAXSIDE)
 	scoreR = make([][]int, MAXSIDE)
 
-	bestL = make([]int, MAXSIDE)
-	bestR = make([]int, MAXSIDE)
+	bestL = make([]int, N)
+	bestR = make([]int, N)
 
 	for i := 0; i < MAXSIDE; i++ {
-		gapaL[i] = make([]int, MAXSIDE)
-		gapbL[i] = make([]int, MAXSIDE)
-		scoreL[i] = make([]int, MAXSIDE)
+		gapaL[i] = make([]int, N)
+		gapbL[i] = make([]int, N)
+		scoreL[i] = make([]int, N)
 
-		gapaR[i] = make([]int, MAXSIDE)
-		gapbR[i] = make([]int, MAXSIDE)
-		scoreR[i] = make([]int, MAXSIDE)
+		gapaR[i] = make([]int, N)
+		gapbR[i] = make([]int, N)
+		scoreR[i] = make([]int, N)
 	}
 
 	scoreL[0][0], gapaL[0][0], gapbL[0][0], scoreR[0][0], gapaR[0][0], gapbR[0][0] = 0, 0, 0, 0, 0, 0
+	bestL[0], bestR[0] = 0, 0
 
 	for i := 1; i < MAXSIDE; i++ {
 		val := GAP_OPENING_SCORE + (i-1)*GAP_EXTENSION_SCORE
-		scoreL[i][0], scoreR[i][0], scoreL[0][i], scoreR[0][i] = 0, 0, val, val
-		gapaL[0][i], gapaL[i][0], gapbL[0][i], gapbL[i][0] = val, val, val, val
-		gapaR[0][i], gapaR[i][0], gapbR[0][i], gapbR[i][0] = val, val, val, val
+		scoreL[i][0], scoreR[i][0] = 0, 0
+		gapaL[i][0], gapbL[i][0] = val, val
+		gapaR[i][0], gapbR[i][0] = val, val
+
+	}
+	for i := 1; i < N; i++ {
+		val := GAP_OPENING_SCORE + (i-1)*GAP_EXTENSION_SCORE
+		scoreL[0][i], scoreR[0][i] = val, val
+		gapaL[0][i], gapbL[0][i] = val, val
+		gapaR[0][i], gapbR[0][i] = val, val
 		bestL[i], bestR[i] = 1, 1
 	}
 }
@@ -65,8 +74,8 @@ func align(refL string, refR string, read string) AlignmentResult {
 	readReversed := Reverse(read)
 	refR = Reverse(refR)
 
-	for i := 1; i < len(refL); i++ {
-		for j := 1; j < len(read); j++ {
+	for i := 1; i <= len(refL); i++ {
+		for j := 1; j <= len(read); j++ {
 			gapaL[i][j] = max2(gapaL[i-1][j], scoreL[i-1][j]+GAP_OPENING_SCORE) + GAP_EXTENSION_SCORE
 			gapbL[i][j] = max2(gapbL[i][j-1], scoreL[i][j-1]+GAP_OPENING_SCORE) + GAP_EXTENSION_SCORE
 
@@ -82,8 +91,8 @@ func align(refL string, refR string, read string) AlignmentResult {
 		}
 	}
 
-	for i := 1; i < len(refR); i++ {
-		for j := 1; j < len(read); j++ {
+	for i := 1; i <= len(refR); i++ {
+		for j := 1; j <= len(read); j++ {
 			gapaR[i][j] = max2(gapaR[i-1][j], scoreR[i-1][j]+GAP_OPENING_SCORE) + GAP_EXTENSION_SCORE
 			gapbR[i][j] = max2(gapbR[i][j-1], scoreR[i][j-1]+GAP_OPENING_SCORE) + GAP_EXTENSION_SCORE
 			if refR[i-1] == readReversed[j-1] {
@@ -102,7 +111,7 @@ func align(refL string, refR string, read string) AlignmentResult {
 	max := scoreL[bestL[len(read)]][len(read)]
 	split := len(read)
 	// find best split
-	for i := len(read) - 1; i > 0; i-- {
+	for i := len(read) - 1; i >= 0; i-- {
 		if scoreL[bestL[i]][i]+scoreR[bestR[len(read)-i]][len(read)-i] > max {
 			max = scoreL[bestL[i]][i] + scoreR[bestR[len(read)-i]][len(read)-i]
 			split = i
@@ -110,7 +119,7 @@ func align(refL string, refR string, read string) AlignmentResult {
 	}
 	endL := bestL[split] - 1
 	startR := len(refR) - bestR[len(read)-split]
-	result.lbp = bestL[split] - 1
+	result.lbp = endL
 	result.rbp = len(refR) - bestR[len(read)-split]
 
 	aL.Reset()
@@ -181,6 +190,7 @@ func align(refL string, refR string, read string) AlignmentResult {
 	result.cL = Reverse(cL.String())
 	// start loc of mapping in ref
 	startL := pi
+	result.pos = startL
 
 	// find identity of left part
 	l := 1 + math.Abs(float64(endL-startL+1-split))
