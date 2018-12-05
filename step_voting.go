@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -17,7 +16,6 @@ import (
 
 // brand new function to vote breakpoint locations
 func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CIStore, svStore SVStore) {
-
 	//Input file
 	f, _ := os.Open(bamFilePath)
 	defer f.Close()
@@ -57,16 +55,13 @@ func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CISto
 			loc = auxValue(rec.AuxFields.Get(rbpTag))
 		}
 
-		// check if split provides enough support (not like 97M-3M, 100M etc.)
-		// and len > 80
-		if isValidSplit(rec.Cigar) {
-			// update num of votes
-			if _, exist := breakpoints[current][loc]; exist {
-				breakpoints[current][loc]++
-			} else {
-				breakpoints[current][loc] = 1
-			}
+		// update num of votes
+		if _, exist := breakpoints[current][loc]; exist {
+			breakpoints[current][loc]++
+		} else {
+			breakpoints[current][loc] = 1
 		}
+
 	}
 
 	// write result to file
@@ -96,28 +91,22 @@ func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CISto
 	writer.Flush()
 }
 
-func combineResults(voteFile string /*contigFile string,*/, outfilePath string, ciStore CIStore, svStore SVStore) {
+func writeRefinedVcf(voteFile string, outfilePath string, ciStore CIStore, svStore SVStore) {
 	f, _ := os.Open(voteFile)
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 
-	/*f2, _ := os.Open(contigFile)
+	g, _ := os.Create(outfilePath)
+	defer g.Close()
+
+	writer := bufio.NewWriter(g)
+
+	f2, _ := os.Open("data/tardis_40x.vcf")
 	defer f2.Close()
-	bamReader, _ := bam.NewReader(f2, *threads)
-	defer bamReader.Close()
-	*/
-	f3, _ := os.Create(outfilePath)
-	defer f3.Close()
-
-	writer := bufio.NewWriter(f3)
-
-	f4, _ := os.Open("data/tardis_40x.vcf")
-	defer f4.Close()
-	vcfscanner := bufio.NewScanner(f4)
+	vcfscanner := bufio.NewScanner(f2)
 
 	leftbp := make(map[string]Loc)
 	rightbp := make(map[string]Loc)
-	//cigarsup := make(map[string][]int)
 
 	// split read support
 	for scanner.Scan() {
@@ -137,25 +126,7 @@ func combineResults(voteFile string /*contigFile string,*/, outfilePath string, 
 				rightbp[svId] = Loc{Pos: pos, VoteNum: support}
 			}
 		}
-	} /*
-		// contig support
-		for {
-			rec, err := bamReader.Read()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				log.Fatalf("error reading bam: %v", err)
-			}
-			if isValidSplit(rec.Cigar) {
-				ciId := auxValue(rec.AuxFields.Get(svTag))
-				lbp := auxValue(rec.AuxFields.Get(lbpTag))
-				rbp := auxValue(rec.AuxFields.Get(rbpTag))
-				svId := ciStore.ciList[ciId].svId
-				cigarsup[svId] = append(cigarsup[svId], lbp)
-				cigarsup[svId] = append(cigarsup[svId], rbp)
-			}
-		}*/
+	}
 
 	// write map to vcf
 	for vcfscanner.Scan() {
@@ -169,22 +140,18 @@ func combineResults(voteFile string /*contigFile string,*/, outfilePath string, 
 	writer.WriteString("##INFO=<ID=CONTIGSUPLBP,Number=1,Type=Integer,Description=\"Pos of left breakpoint if supported by assembly\">\n")
 	writer.WriteString("##INFO=<ID=CONTIGSUPRBP,Number=1,Type=Integer,Description=\"Pos of right breakpoint if supported by assembly\">\n")
 	writer.WriteString("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tcnv_1000_ref\n")
+
 	for svId := range leftbp {
 		_sv := svStore.get(svId)
 		writer.WriteString(_sv.Chromosome + "\t" + strconv.Itoa(leftbp[svId].Pos) + "\t" + _sv.id + "\t.\t" + _sv.Type + "\t255\tPASS\t")
 		svlen := rightbp[svId].Pos - leftbp[svId].Pos
 		writer.WriteString("END=" + strconv.Itoa(rightbp[svId].Pos) + ";SVLEN=" + strconv.Itoa(svlen))
-		writer.WriteString(";SRSUPL=" + strconv.Itoa(leftbp[svId].VoteNum) + ";SRSUPR=" + strconv.Itoa(rightbp[svId].VoteNum))
-		//if len(cigarsup[svId]) != 0 {
-		//	writer.WriteString(";CONTIGSUPLBP=" + strconv.Itoa(cigarsup[svId][0]) + ";CONTIGSUPRBP=" + strconv.Itoa(cigarsup[svId][1]) + "\n")
-		//} else {
-		writer.WriteString("\n")
-		//}
+		writer.WriteString(";SRSUPL=" + strconv.Itoa(leftbp[svId].VoteNum) + ";SRSUPR=" + strconv.Itoa(rightbp[svId].VoteNum) + "\n")
 	}
 	writer.Flush()
 }
 
-func compareWithTruth(resultfile string, truthfile string) {
+func compareWithTruth(resultfile string, truthfile string, strType string) {
 	f, _ := os.Open(resultfile)
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -201,9 +168,9 @@ func compareWithTruth(resultfile string, truthfile string) {
 		words := strings.Fields(scanner2.Text())
 		_start, _ := strconv.Atoi(words[1])
 		_end, _ := strconv.Atoi(words[2])
-		_len := _end - _start //strconv.Atoi(words[3])
+		//_len := _end - _start
 		_type := words[5]
-		if _type == "del" && _len <= 10000 {
+		if _type == strType {
 			truth = append(truth, SV{id: ".", Chromosome: words[0][3:], Start: _start, End: _end, Type: _type})
 			count++
 		}
@@ -219,46 +186,49 @@ func compareWithTruth(resultfile string, truthfile string) {
 		info := words[7]
 		pos := strings.Index(info, ";")
 		_end, _ := strconv.Atoi(info[4:pos])
-		result = append(result, SV{id: words[2], Chromosome: words[0], Start: _start, End: _end, Type: "del"})
+		result = append(result, SV{id: words[2], Chromosome: words[0], Start: _start, End: _end, Type: strType})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Start < result[j].Start })
 
 	fmt.Printf("result len %d \n", len(result))
 	// compare
-	margin := 5
 	j := 0
 	lTRUE := 0
 	rTRUE := 0
-	for i := 0; i < len(result) && j < len(truth); {
+	var i int
+	for i = 0; i < len(result) && j < len(truth); {
 
-		if math.Abs(float64(result[i].Start-truth[j].Start)) == float64(margin) {
-			fmt.Printf("%s L %d\n", result[i].id, result[i].Start)
-		}
-		if math.Abs(float64(result[i].End-truth[j].End)) == float64(margin) {
-			fmt.Printf("%s R %d\n", result[i].id, result[i].End)
-		}
-
-		if result[i].Start-truth[j].Start > margin {
+		if result[i].Start-truth[j].Start > *margin {
 			j++
-		} else if truth[j].Start-result[i].Start > margin {
+		} else if truth[j].Start-result[i].Start > *margin {
+			//fmt.Printf("L %s %d\n", result[i].id, result[i].Start)
 			i++
 		} else {
 			lTRUE++
 			i++
-			j++
 		}
 	}
+
+	for ; i < len(result); i++ {
+		//fmt.Printf("L %s %d\n", result[i].id, result[i].Start)
+	}
+
 	j = 0
-	for i := 0; i < len(result) && j < len(truth); {
-		if result[i].End-truth[j].End > margin {
+	for i = 0; i < len(result) && j < len(truth); {
+		if result[i].End-truth[j].End > *margin {
 			j++
-		} else if truth[j].End-result[i].End > margin {
+		} else if truth[j].End-result[i].End > *margin {
+			//fmt.Printf("R %s %d\n", result[i].id, result[i].End)
 			i++
 		} else {
 			rTRUE++
 			i++
-			j++
 		}
 	}
+
+	for ; i < len(result); i++ {
+		//fmt.Printf("R %s %d\n", result[i].id, result[i].End)
+	}
+
 	fmt.Printf("LEFT bp found %d\nRIGHT bp found %d\n", lTRUE, rTRUE)
 }

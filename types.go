@@ -71,6 +71,7 @@ type IndexPair struct {
 	mappingOri int
 	pairNumber int
 	ciIndex    int
+	secondary  int
 }
 
 const (

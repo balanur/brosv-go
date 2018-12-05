@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"log"
@@ -17,75 +16,81 @@ import (
 	"github.com/biogo/hts/sam"
 )
 
-func isSignaling(record *sam.Record) (SVType, int) {
+func isSignaling(record *sam.Record, svType SVType) bool {
 	flags := record.Flags
 	pos := record.Pos
 	matePos := record.MatePos
 	cigar := record.Cigar.String()
 
 	if flags&sam.Paired == 0 {
-		return none, 0
+		return false
 	}
 
 	if flags&sam.Unmapped != 0 {
-		return none, 0
+		return false
 	}
 
 	// Mate is unmapped
 	if flags&sam.MateUnmapped != 0 {
-		return none, 0
+		return false
 	}
 
 	// Mate is in another chromosome
 	if record.Ref.Name() != record.MateRef.Name() {
-		//return true, false - not for dels
-		return none, 0
+		return false
 	}
 
-	// Same direction with mate
-	if flags&sam.Reverse != 0 && flags&sam.MateReverse != 0 { // --
-		return inv, 0
-	}
-	if flags&sam.Reverse == 0 && flags&sam.MateReverse == 0 { // ++
-		return inv, 0
-	}
-
-	// Read placed before its mate -+
+	// Read placed before its mate -+ //tandup
 	if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos {
-		return tandup, 0
+		return false
 	}
 
-	// Read placed after its mate -+
+	// Read placed after its mate -+ //tandup
 	if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos {
-		return tandup, 0
+		return false
 	}
 
-	// Discard hard clipped alignments
-	if strings.Index(cigar, "H") != -1 {
-		return none, 0
-	}
-
-	// Clipped Alignments
+	// Clipped Alignments Pattern
 	r, _ := regexp.Compile("[1-9][0-9]S")
 
-	// Insert size (pairs mapped too closer or farther than expected)
-	max := float64(segmentSize + 3*variance)
-	if math.Abs(float64(pos-matePos)) > max {
+	if svType == inv {
+
+		// Same direction with mate
+		if flags&sam.Reverse != 0 && flags&sam.MateReverse != 0 { // --
+			return true
+		}
+		if flags&sam.Reverse == 0 && flags&sam.MateReverse == 0 { // ++
+			return true
+		}
+
+		// just split in inv region
 		if r.MatchString(cigar) {
-			return del, 2
-		} else {
-			return del, 1
+			return true
 		}
 	}
 
-	// Just clipped (not mapping too farther than expected)
-	if r.MatchString(cigar) {
-		return del, 2
+	if svType == del {
+		// Insert size (pairs mapped too closer or farther than expected)
+		max := float64(segmentSize + 3*variance)
+		if math.Abs(float64(pos-matePos)) > max {
+			if r.MatchString(cigar) {
+				return true
+			}
+		}
+		// Just clipped (not mapping too farther than expected)
+		if r.MatchString(cigar) {
+			return true
+		}
+
+		if strings.Index(cigar, "H") != -1 {
+			return true
+		}
 	}
-	return none, 0
+	return false
 }
 
-func matchAlignmentsToSVs(bamFilePath string, ciStore CIStore) map[string][]IndexPair {
+func extractSignalingInCI(bamFilePath string, outputBamFilePath string, ciStore CIStore, svType SVType) {
+
 	f, _ := os.Open(bamFilePath)
 	defer f.Close()
 
@@ -96,12 +101,17 @@ func matchAlignmentsToSVs(bamFilePath string, ciStore CIStore) map[string][]Inde
 		log.Fatalf("could not open file %q:", err)
 	}
 
-	signalingReads := make(map[string][]IndexPair)
+	g, _ := os.Create(outputBamFilePath)
+	defer g.Close()
+
+	bamWriter, _ := bam.NewWriter(g, bamReader.Header(), 0)
+	defer bamWriter.Close()
 
 	var wg sync.WaitGroup
 	wg.Add(*threads)
 	channels := make([]chan *sam.Record, *threads)
-	var mapLock sync.Mutex
+	var writeLock sync.Mutex
+
 	for threadIndex := 0; threadIndex < *threads; threadIndex++ {
 		channels[threadIndex] = make(chan *sam.Record, 2000)
 		go func(tIndex int) {
@@ -109,42 +119,17 @@ func matchAlignmentsToSVs(bamFilePath string, ciStore CIStore) map[string][]Inde
 
 			for rec := range channels[tIndex] {
 
-				svType, whichCi := isSignaling(rec)
+				if isSignaling(rec, svType) {
 
-				if svType == del {
 					intersectingIntervals := ciStore.findIntersectingIntervals(rec.Ref.Name(), rec.Pos, rec.Pos+rec.Len())
 
-					// write for the interval itself
 					for _, intervalIndex := range intersectingIntervals {
-						pair := IndexPair{mappingOri: getMappingOri(rec), pairNumber: getPairNumber(rec), ciIndex: intervalIndex}
-						mapLock.Lock()
-						signalingReads[rec.Name] = append(signalingReads[rec.Name], pair)
-						mapLock.Unlock()
-					}
-					// write for other CI of SV as well
-					if whichCi == 2 {
-						for _, intervalIndex := range intersectingIntervals {
-							currentCI := ciStore.ciList[intervalIndex]
-							var otherCI int
-							if currentCI.side == leftCI {
-								otherCI = rightCIs[currentCI.svId]
-							} else {
-								otherCI = leftCIs[currentCI.svId]
-							}
-
-							pair := IndexPair{mappingOri: getMappingOri(rec), pairNumber: getPairNumber(rec), ciIndex: otherCI}
-							mapLock.Lock()
-							signalingReads[rec.Name] = append(signalingReads[rec.Name], pair)
-							mapLock.Unlock()
-						}
-					}
-				} else if svType == inv { // to be continued...
-					intersectingIntervals := ciStore.findIntersectingIntervals(rec.Ref.Name(), rec.Pos, rec.Pos+rec.Len())
-					for _, intervalIndex := range intersectingIntervals {
-						pair := IndexPair{mappingOri: getMappingOri(rec), pairNumber: getPairNumber(rec), ciIndex: intervalIndex}
-						mapLock.Lock()
-						signalingReads[rec.Name] = append(signalingReads[rec.Name], pair)
-						mapLock.Unlock()
+						newAux, _ := sam.NewAux(svTag, intervalIndex)
+						rec.AuxFields = append(rec.AuxFields, newAux)
+						writeLock.Lock()
+						bamWriter.Write(rec)
+						writeLock.Unlock()
+						rec.AuxFields = rec.AuxFields[:len(rec.AuxFields)-1]
 					}
 				}
 			}
@@ -176,23 +161,72 @@ func matchAlignmentsToSVs(bamFilePath string, ciStore CIStore) map[string][]Inde
 	fmt.Println("Waiting on threads")
 	wg.Wait()
 
-	return signalingReads
 }
 
-func WriteMapToFile(signalingReads map[string][]IndexPair, filePath string) {
-	f, _ := os.Create(filePath)
+func setBreakpointTags(bamFilePath string, outputBamFilePath string, ciStore CIStore) {
+	f, _ := os.Open(bamFilePath)
 	defer f.Close()
 
-	writer := bufio.NewWriter(f)
+	bamReader, _ := bam.NewReader(f, *threads)
+	defer bamReader.Close()
 
-	for k, v := range signalingReads {
-		writer.WriteString(k)
-		// If value type is integer array
-		for i := range v {
-			writer.WriteString(" " + strconv.Itoa(v[i].ciIndex) + " " + strconv.Itoa(v[i].pairNumber) + " " + strconv.Itoa(v[i].mappingOri))
-		}
-		writer.WriteString("\n")
+	if ok, err := bgzf.HasEOF(f); err != nil || !ok {
+		log.Fatalf("could not open file %q:", err)
 	}
 
-	writer.Flush()
+	g1, _ := os.Create(outputBamFilePath + "cluster_withbp.bam")
+	defer g1.Close()
+
+	bamWriter, _ := bam.NewWriter(g1, bamReader.Header(), 0)
+	defer bamWriter.Close()
+
+	readIndex := 0
+	for {
+		rec, err := bamReader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("error reading bam: %v", err)
+		}
+
+		ciIndex := auxValue(rec.AuxFields.Get(svTag))
+		currentCI := ciStore.ciList[ciIndex]
+		cigar := rec.Cigar.String()
+
+		m := strings.Index(cigar, "M")
+		s := strings.Index(cigar, "S")
+		h := strings.Index(cigar, "H")
+		var val int
+
+		if m < s || m < h {
+			m, _ = strconv.Atoi(cigar[0:m])
+			val = m + rec.Pos
+		} else {
+			if s != -1 {
+				m, _ = strconv.Atoi(cigar[s+1 : m])
+			} else if h != -1 {
+				m, _ = strconv.Atoi(cigar[h+1 : m])
+			}
+			val = rec.Pos
+		}
+
+		// eliminate insignificant splits
+		if m >= 10 {
+			if currentCI.side == leftCI {
+				newAux, _ := sam.NewAux(lbpTag, val)
+				rec.AuxFields = append(rec.AuxFields, newAux)
+			} else {
+				newAux, _ := sam.NewAux(rbpTag, val)
+				rec.AuxFields = append(rec.AuxFields, newAux)
+			}
+
+			bamWriter.Write(rec)
+			rec.AuxFields = rec.AuxFields[:len(rec.AuxFields)-1]
+		}
+		readIndex++
+		if readIndex%1000000 == 0 {
+			fmt.Printf("Reads at %s %d %d\r", rec.Ref.Name(), rec.Pos, rec.Pos+rec.Len())
+		}
+	}
 }

@@ -19,12 +19,11 @@ type AlignmentResult struct {
 	lbp, rbp, pos        int
 }
 
-var MAXSIDE int
-var gapaL, gapbL, gapaR, gapbR, scoreL, scoreR [][]int
-var bestL, bestR []int
-var aL, bL, cL, aR, bR, cR bytes.Buffer
+func align(N int, refL string, refR string, read string, svtype string) AlignmentResult {
+	var gapaL, gapbL, gapaR, gapbR, scoreL, scoreR [][]int
+	var bestL, bestR []int
+	var aL, bL, cL, aR, bR, cR bytes.Buffer
 
-func initAligner(N int) {
 	N++
 	MAXSIDE := 100000
 
@@ -66,13 +65,13 @@ func initAligner(N int) {
 		gapaR[0][i], gapbR[0][i] = val, val
 		bestL[i], bestR[i] = 1, 1
 	}
-}
 
-func align(refL string, refR string, read string) AlignmentResult {
 	var result AlignmentResult
 
 	readReversed := Reverse(read)
-	refR = Reverse(refR)
+	if svtype == "del" {
+		refR = Reverse(refR)
+	}
 
 	for i := 1; i <= len(refL); i++ {
 		for j := 1; j <= len(read); j++ {
@@ -107,7 +106,7 @@ func align(refL string, refR string, read string) AlignmentResult {
 		}
 	}
 
-	// backtrace!!!
+	// backtrace
 	max := scoreL[bestL[len(read)]][len(read)]
 	split := len(read)
 	// find best split
@@ -118,9 +117,15 @@ func align(refL string, refR string, read string) AlignmentResult {
 		}
 	}
 	endL := bestL[split] - 1
-	startR := len(refR) - bestR[len(read)-split]
 	result.lbp = endL
-	result.rbp = len(refR) - bestR[len(read)-split]
+	var startR int
+	if svtype == "del" {
+		startR = len(refR) - bestR[len(read)-split]
+		result.rbp = len(refR) - bestR[len(read)-split] - 1
+	} else if svtype == "INV" {
+		startR = bestR[len(read)-split]
+		result.rbp = bestR[len(read)-split] - 1
+	}
 
 	aL.Reset()
 	bL.Reset()
