@@ -6,10 +6,12 @@ import (
 	"io"
 	"log"
 	"os"
+	//"path"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/balanur/vcfgo"
 	"github.com/biogo/hts/bam"
 	"github.com/biogo/hts/bgzf"
 )
@@ -34,6 +36,7 @@ func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CISto
 
 	breakpoints := make(map[int]map[int]int)
 	current := -1
+
 	for {
 		rec, err := bamReader.Read()
 		if err == io.EOF {
@@ -51,8 +54,10 @@ func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CISto
 		var loc int
 		if ciStore.ciList[ciIndex].side == leftCI {
 			loc = auxValue(rec.AuxFields.Get(lbpTag))
-		} else {
+		} else if ciStore.ciList[ciIndex].side == rightCI {
 			loc = auxValue(rec.AuxFields.Get(rbpTag))
+		} else {
+			loc = auxValue(rec.AuxFields.Get(copyTag))
 		}
 
 		// update num of votes
@@ -69,8 +74,10 @@ func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CISto
 		var side int
 		if ciStore.ciList[k].side == leftCI {
 			side = 1
-		} else {
+		} else if ciStore.ciList[k].side == rightCI {
 			side = 2
+		} else {
+			side = 3
 		}
 
 		var list []Loc
@@ -91,7 +98,7 @@ func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CISto
 	writer.Flush()
 }
 
-func writeRefinedVcf(voteFile string, outfilePath string, ciStore CIStore, svStore SVStore) {
+func writeRefinedVcf(voteFile string, outfilePath string, refFilePath string, ciStore CIStore, svStore SVStore) {
 	f, _ := os.Open(voteFile)
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -107,6 +114,7 @@ func writeRefinedVcf(voteFile string, outfilePath string, ciStore CIStore, svSto
 
 	leftbp := make(map[string]Loc)
 	rightbp := make(map[string]Loc)
+	copybp := make(map[string]Loc)
 
 	// split read support
 	for scanner.Scan() {
@@ -122,8 +130,10 @@ func writeRefinedVcf(voteFile string, outfilePath string, ciStore CIStore, svSto
 			// fill sv maps
 			if side == 1 {
 				leftbp[svId] = Loc{Pos: pos, VoteNum: support}
-			} else {
+			} else if side == 2 {
 				rightbp[svId] = Loc{Pos: pos, VoteNum: support}
+			} else {
+				copybp[svId] = Loc{Pos: pos, VoteNum: support}
 			}
 		}
 	}
@@ -134,101 +144,455 @@ func writeRefinedVcf(voteFile string, outfilePath string, ciStore CIStore, svSto
 			writer.WriteString(vcfscanner.Text() + "\n")
 		}
 	}
-	// fix this wtf is this
+	// write header
 	writer.WriteString("##INFO=<ID=SRSUPL,Number=1,Type=Integer,Description=\"Number of supporting split reads on left\">\n")
 	writer.WriteString("##INFO=<ID=SRSUPR,Number=1,Type=Integer,Description=\"Number of supporting split reads on right\">\n")
-	writer.WriteString("##INFO=<ID=CONTIGSUPLBP,Number=1,Type=Integer,Description=\"Pos of left breakpoint if supported by assembly\">\n")
-	writer.WriteString("##INFO=<ID=CONTIGSUPRBP,Number=1,Type=Integer,Description=\"Pos of right breakpoint if supported by assembly\">\n")
 	writer.WriteString("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tcnv_1000_ref\n")
+
+	ref := readReference(refFilePath)
+
+	//leftlimit := 0
+	//rightlimit := 0
 
 	for svId := range leftbp {
 		_sv := svStore.get(svId)
-		writer.WriteString(_sv.Chromosome + "\t" + strconv.Itoa(leftbp[svId].Pos) + "\t" + _sv.id + "\t.\t" + _sv.Type + "\t255\tPASS\t")
-		svlen := rightbp[svId].Pos - leftbp[svId].Pos
-		writer.WriteString("END=" + strconv.Itoa(rightbp[svId].Pos) + ";SVLEN=" + strconv.Itoa(svlen))
-		writer.WriteString(";SRSUPL=" + strconv.Itoa(leftbp[svId].VoteNum) + ";SRSUPR=" + strconv.Itoa(rightbp[svId].VoteNum) + "\n")
+
+		// if there is enough support
+		if leftbp[svId].VoteNum >= 5 || rightbp[svId].VoteNum >= 5 {
+
+			REF, ALT := getREFALT(ref, _sv, leftbp[svId].Pos-1, rightbp[svId].Pos)
+			writer.WriteString(_sv.Chromosome + "\t" + strconv.Itoa(leftbp[svId].Pos) + "\t" + _sv.id + "\t" + REF + "\t" + ALT + "\t255\tPASS\t")
+			svlen := rightbp[svId].Pos - leftbp[svId].Pos
+			writer.WriteString("SVTYPE=" + _sv.Type + ";END=" + strconv.Itoa(rightbp[svId].Pos) + ";SVLEN=" + strconv.Itoa(svlen))
+			if _sv.Type == "DUP:ISP" {
+				writer.WriteString(";POS2=" + strconv.Itoa(copybp[svId].Pos))
+			}
+			writer.WriteString(";SRSUPL=" + strconv.Itoa(leftbp[svId].VoteNum) + ";SRSUPR=" + strconv.Itoa(rightbp[svId].VoteNum))
+			if _sv.Type == "DUP:ISP" {
+				writer.WriteString(";SRSUPCPY=" + strconv.Itoa(copybp[svId].VoteNum))
+			}
+			writer.WriteString("\n")
+		}
 	}
 	writer.Flush()
+
+	//fmt.Printf("LEFT supported : %d\nRIGHT supported: %d\n", leftlimit, rightlimit)
 }
 
-func compareWithTruth(resultfile string, truthfile string, strType string) {
+func getREFALT(ref Genome, sv SV, start int, end int) (string, string) {
+	if end <= start {
+		return ".", "."
+	}
+
+	REF := ref.getChr(sv.Chromosome).content[start:end]
+	//fmt.Printf("%d\n", len(REF))
+
+	if sv.Type == "DEL" {
+		return REF[0:1], "<DEL>"
+	} else if sv.Type == "INV" {
+		return REF[0:1], "<INV>"
+	} else if sv.Type == "DUP:TANDEM" {
+		return REF[0:1], "<DUP:TANDEM>"
+	} else if sv.Type == "DUP:ISP" {
+		return REF[0:1], "<DUP:ISP>"
+	}
+	return ".", "."
+}
+
+func sortcond(x SV, y SV) bool {
+	if x.Chromosome < y.Chromosome {
+		return true
+	} else if x.Chromosome > y.Chromosome {
+		return false
+	} else if x.Start < y.Start {
+		return true
+	} else {
+		return false
+	}
+}
+
+func compareWithTruth(resultfile string, truthfile string, strType string, strSample string, ciStore CIStore) {
 	f, _ := os.Open(resultfile)
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 
-	f2, _ := os.Open(truthfile)
-	defer f2.Close()
-	scanner2 := bufio.NewScanner(f2)
-
 	var truth []SV
 	var result []SV
 
-	count := 0
-	for scanner2.Scan() {
-		words := strings.Fields(scanner2.Text())
-		_start, _ := strconv.Atoi(words[1])
-		_end, _ := strconv.Atoi(words[2])
-		//_len := _end - _start
-		_type := words[5]
-		if _type == strType {
-			truth = append(truth, SV{id: ".", Chromosome: words[0][3:], Start: _start, End: _end, Type: _type})
-			count++
+	var filter string
+	if strType == "tandup" {
+		strType = "dup"
+		filter = "tandem"
+	} else if strType == "intdup" {
+		strType = "dup"
+		filter = "interspersed"
+	}
+
+	if strings.Contains(truthfile, "vcf") {
+		f2, _ := os.Open(truthfile)
+		rdr, err := vcfgo.NewReader(f2, false)
+		if err != nil {
+			panic(err)
+		}
+		for {
+			variant := rdr.Read()
+
+			if variant == nil {
+				break
+			}
+			svType, _ := variant.Info().Get("SVTYPE")
+			_type := svType.(string)
+			start := int(variant.Pos)
+			endd, _ := variant.Info().Get("END")
+			end := endd.(int)
+			chr := variant.Chromosome
+			truth = append(truth, SV{id: ".", Chromosome: chr, Start: start, End: end, Type: _type})
+		}
+	} else {
+		// get truth file as .bed
+		f2, _ := os.Open(truthfile)
+		defer f2.Close()
+		scanner2 := bufio.NewScanner(f2)
+
+		for scanner2.Scan() {
+			words := strings.Fields(scanner2.Text())
+			start, _ := strconv.Atoi(words[1])
+			end, _ := strconv.Atoi(words[2])
+			if len(words) <= 3 {
+				truth = append(truth, SV{id: ".", Chromosome: words[0], Start: start, End: end, Type: strType})
+				continue
+			}
+			_type := words[5]
+
+			// not duplication
+			if strType == _type && strType != "dup" {
+				truth = append(truth, SV{id: ".", Chromosome: words[0][3:], Start: start, End: end, Type: _type})
+				continue
+			}
+			// tandem duplication
+			if strType == _type && filter == "tandem" && words[11] == "tandem" {
+				truth = append(truth, SV{id: ".", Chromosome: words[0][3:], Start: start, End: end, Type: _type})
+				continue
+			}
+			// interspersed & inverted duplication
+			if strType == _type && filter == "interspersed" {
+				if words[11] == "interspersed" || words[11] == "inverted" {
+					jump, _ := strconv.Atoi(words[10])
+					truth = append(truth, SV{id: ".", Chromosome: words[0][3:], Start: start, End: end, Type: _type, copyPos: start + jump})
+					continue
+				}
+			}
 		}
 	}
-	sort.Slice(truth, func(i, j int) bool { return truth[i].Start < truth[j].Start })
+
+	sort.Slice(truth, func(i, j int) bool { return sortcond(truth[i], truth[j]) })
+	fmt.Printf("Truth len %d \n", len(truth))
+	//redundancy check
+	/*	var temp []SV
+		temp = append(temp, truth[0])
+
+		for i := 1; i < len(truth); i++ {
+			if truth[i].Chromosome != truth[i-1].Chromosome {
+				temp = append(temp, truth[i])
+			} else if truth[i-1].End < truth[i].Start {
+				temp = append(temp, truth[i])
+			} else {
+				temp[len(temp)-1].End = truth[i].End
+			}
+		}
+		truth = temp
+		fmt.Printf("Truth len %d (no intersection)\n", len(truth))*/
+
+	verified := make(map[string]int)
 
 	for scanner.Scan() {
 		words := strings.Fields(scanner.Text())
 		if words[0][0] == '#' {
 			continue
 		}
-		_start, _ := strconv.Atoi(words[1])
+		start, _ := strconv.Atoi(words[1])
 		info := words[7]
-		pos := strings.Index(info, ";")
-		_end, _ := strconv.Atoi(info[4:pos])
-		result = append(result, SV{id: words[2], Chromosome: words[0], Start: _start, End: _end, Type: strType})
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Start < result[j].Start })
+		x := strings.Index(info, "END=")
+		y := strings.Index(info[x:len(info)], ";")
+		end, _ := strconv.Atoi(info[x+4 : x+y])
 
-	fmt.Printf("result len %d \n", len(result))
+		x = strings.Index(info, "SVTYPE=")
+		y = strings.Index(info[x:len(info)], ";")
+		if y <= 0 {
+			y = len(info) - x
+		}
+		svtype := info[x+7 : x+y]
+
+		if filter == "tandem" {
+			strType = "DUP:TANDEM"
+		} else if filter == "interspersed" {
+			strType = "DUP:ISP"
+		}
+		if strings.EqualFold(svtype, strType) {
+
+			// interspersed && inverted duplication
+			if filter == "interspersed" {
+				x := strings.Index(info, "POS2=")
+				y := strings.Index(info[x:len(info)], ";")
+				copypos, _ := strconv.Atoi(info[x+5 : x+y])
+				result = append(result, SV{id: words[2], Chromosome: words[0], Start: start, End: end, Type: strType, copyPos: copypos})
+			} else { // all other result
+				result = append(result, SV{id: words[2], Chromosome: words[0], Start: start, End: end, Type: strType})
+			}
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return sortcond(result[i], result[j]) })
+
+	fmt.Printf("Result len %d \n", len(result))
+
+	//redundancy check
+	var temp2 []SV
+	temp2 = append(temp2, result[0])
+
+	for i := 1; i < len(result); i++ {
+		if result[i].Chromosome != result[i-1].Chromosome {
+			temp2 = append(temp2, result[i])
+		} else if result[i-1].End < result[i].Start {
+			temp2 = append(temp2, result[i])
+		}
+	}
+	result = temp2
+	fmt.Printf("Result len %d (no redundancy)\n", len(result))
+
+	//for i := 0; i < len(result); i++ {
+	//	fmt.Printf("%s %d %d\n", result[i].Chromosome, result[i].Start, result[i].End)
+	//}
+
+	//performanceForCIs(truth, result)
+	//return
+
 	// compare
+	i := 0
 	j := 0
 	lTRUE := 0
 	rTRUE := 0
-	var i int
-	for i = 0; i < len(result) && j < len(truth); {
+	cTRUE := 0
+	FPs := make(map[string]SV)
+	FNs := make(map[int]SV)
+	TPs := make(map[string]SV)
+	TPs2 := make(map[int]SV)
 
-		if result[i].Start-truth[j].Start > *margin {
+	// left breakpoint
+	for i = 0; i < len(result) && j < len(truth); {
+		if result[i].Chromosome > truth[j].Chromosome {
+			FNs[truth[j].Start] = truth[j]
 			j++
-		} else if truth[j].Start-result[i].Start > *margin {
-			//fmt.Printf("L %s %d\n", result[i].id, result[i].Start)
+		} else if truth[j].Chromosome > result[i].Chromosome {
+			FPs[result[i].id] = result[i]
 			i++
 		} else {
-			lTRUE++
-			i++
+			if result[i].Start-truth[j].Start > *margin {
+				FNs[truth[j].Start] = truth[j]
+				j++
+			} else if truth[j].Start-result[i].Start > *margin {
+				FPs[result[i].id] = result[i]
+				i++
+			} else {
+				verified[result[i].id] = 1
+				TPs[result[i].id] = result[i]
+				TPs2[truth[j].Start] = truth[j]
+				lTRUE++
+				i++
+				j++
+			}
 		}
 	}
 
 	for ; i < len(result); i++ {
-		//fmt.Printf("L %s %d\n", result[i].id, result[i].Start)
+		FPs[result[i].id] = result[i]
 	}
 
+	for ; j < len(truth); j++ {
+		FNs[truth[j].Start] = truth[j]
+	}
+
+	fmt.Printf("TP: %d FP: %d FN: %d\n", len(TPs), len(FPs), len(FNs))
+
+	// right breakpoint
 	j = 0
 	for i = 0; i < len(result) && j < len(truth); {
-		if result[i].End-truth[j].End > *margin {
+		if result[i].Chromosome > truth[j].Chromosome {
 			j++
-		} else if truth[j].End-result[i].End > *margin {
-			//fmt.Printf("R %s %d\n", result[i].id, result[i].End)
+		} else if truth[j].Chromosome > result[i].Chromosome {
+			if _, ok := TPs[result[i].id]; !ok {
+				FPs[result[i].id] = result[i]
+			}
 			i++
 		} else {
-			rTRUE++
-			i++
+			if result[i].End-truth[j].End > *margin {
+				j++
+			} else if truth[j].End-result[i].End > *margin {
+				if _, ok := TPs[result[i].id]; !ok {
+					FPs[result[i].id] = result[i]
+				}
+				i++
+			} else {
+				if _, ok := FPs[result[i].id]; ok {
+					fmt.Printf("FP %d %d , %d %d\n", truth[j].Start, truth[j].End, result[i].Start, result[i].End)
+					delete(FPs, result[i].id)
+				}
+				if _, ok := FNs[truth[j].Start]; ok {
+					fmt.Printf("FN %d %d , %d %d\n", truth[j].Start, truth[j].End, result[i].Start, result[i].End)
+					delete(FNs, truth[j].Start)
+				}
+				TPs[result[i].id] = result[i]
+				TPs2[truth[j].Start] = truth[j]
+				verified[result[i].id] = 1
+				rTRUE++
+				i++
+				j++
+			}
 		}
 	}
 
 	for ; i < len(result); i++ {
-		//fmt.Printf("R %s %d\n", result[i].id, result[i].End)
+		FPs[result[i].id] = result[i]
 	}
 
-	fmt.Printf("LEFT bp found %d\nRIGHT bp found %d\n", lTRUE, rTRUE)
+	for ; j < len(truth); j++ {
+		FNs[truth[j].Start] = truth[j]
+	}
+
+	fmt.Printf("TP: %d FP: %d FN: %d\n", len(TPs2), len(FPs), len(FNs))
+
+	if filter == "interspersed" {
+		// copy loci for interspersed
+		j = 0
+		for i = 0; i < len(result) && j < len(truth); {
+			if result[i].Chromosome > truth[j].Chromosome {
+				j++
+			} else if truth[j].Chromosome > result[i].Chromosome {
+				i++
+			} else {
+				if result[i].copyPos-truth[j].copyPos > *margin {
+					j++
+				} else if truth[j].copyPos-result[i].copyPos > *margin {
+					i++
+				} else {
+					verified[result[i].id] = 1
+					cTRUE++
+					i++
+				}
+			}
+		}
+	}
+
+	//writeVerifiedVCF(verified, resultfile, path.Join(*workdir, "verified.vcf"))
+	fmt.Printf("LEFT bp found %d\nRIGHT bp found %d\nCopy bp found %d\n", lTRUE, rTRUE, cTRUE)
+}
+
+func writeVerifiedVCF(verified map[string]int, resultfile string, outfilePath string) {
+	f, _ := os.Open(resultfile)
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+
+	g, _ := os.Create(outfilePath)
+	defer g.Close()
+	writer := bufio.NewWriter(g)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		words := strings.Fields(line)
+		if words[0][0] == '#' {
+			continue
+		}
+
+		_svid := words[2]
+		if verified[_svid] > 0 {
+			writer.WriteString(line + "\n")
+		}
+	}
+	writer.Flush()
+}
+
+// tp, fp, fn
+func performanceForCIs(truth []SV, result []SV) {
+
+	FPs := make(map[string]SV)
+	FNs := make(map[int]SV)
+	TPs := make(map[string]SV)
+	i := 0
+	j := 0
+
+	for i = 0; i < len(result) && j < len(truth); {
+		lid := leftCIs[result[i].id]
+		if result[i].Chromosome > truth[j].Chromosome {
+			FNs[truth[j].Start] = truth[j]
+			j++
+		} else if truth[j].Chromosome > result[i].Chromosome {
+			FPs[result[i].id] = result[i]
+			i++
+		} else {
+			if truth[j].Start < ciStore.ciList[lid].head {
+				FNs[truth[j].Start] = truth[j]
+				j++
+			} else if ciStore.ciList[lid].head <= truth[j].Start && truth[j].Start <= ciStore.ciList[lid].tail {
+				TPs[result[i].id] = result[i]
+				i++
+				j++
+			} else if ciStore.ciList[lid].tail < truth[j].Start {
+				FPs[result[i].id] = result[i]
+				i++
+			}
+		}
+	}
+	j = 0
+	for i = 0; i < len(result) && j < len(truth); {
+		rid := rightCIs[result[i].id]
+		if result[i].Chromosome > truth[j].Chromosome {
+			_, ok := TPs[result[i].id]
+			_, ok2 := FPs[result[i].id]
+			if !ok && !ok2 {
+				FNs[truth[j].Start] = truth[j]
+			}
+			j++
+		} else if truth[j].Chromosome > result[i].Chromosome {
+			if _, ok := TPs[result[i].id]; !ok {
+				FPs[result[i].id] = result[i]
+			}
+			i++
+		} else {
+			if truth[j].End < ciStore.ciList[rid].head {
+				_, ok := TPs[result[i].id]
+				_, ok2 := FPs[result[i].id]
+				if !ok && !ok2 {
+					FNs[truth[j].Start] = truth[j]
+				}
+				j++
+			} else if ciStore.ciList[rid].head <= truth[j].End && truth[j].End <= ciStore.ciList[rid].tail {
+				if _, ok := FPs[result[i].id]; ok {
+					delete(FPs, result[i].id)
+				}
+				if _, ok := FNs[truth[j].Start]; ok {
+					delete(FNs, truth[j].Start)
+				}
+				TPs[result[i].id] = result[i]
+				i++
+				j++
+			} else if ciStore.ciList[rid].tail < truth[j].End {
+				if _, ok := TPs[result[i].id]; !ok {
+					FPs[result[i].id] = result[i]
+				}
+				i++
+			}
+		}
+	}
+	for ; i < len(result); i++ {
+		FPs[result[i].id] = result[i]
+	}
+
+	for ; j < len(truth); j++ {
+		FNs[truth[j].Start] = truth[j]
+	}
+
+	//for k, _ := range FPs {
+	//	fmt.Printf("%s %d %d\n", FPs[k].id, FPs[k].Start, FPs[k].End)
+	//}
+
+	fmt.Printf("TP: %d FP: %d FN: %d\n", len(TPs), len(FPs), len(FNs))
 }

@@ -298,3 +298,120 @@ func formatQual(q []byte) []byte {
 	}
 	return []byte{'*'}
 }
+
+func writeCIstobed(cifile string, ciStore CIStore, strType string) {
+
+	//Output file
+	g, _ := os.Create(cifile)
+	defer g.Close()
+	writer := bufio.NewWriter(g)
+
+	for id, i := range leftCIs {
+		j := rightCIs[id]
+		k := copyCIs[id]
+		left := ciStore.ciList[i]
+		right := ciStore.ciList[j]
+		copy := ciStore.ciList[k]
+		if left.head >= left.tail {
+			fmt.Printf("wtf %d %d\n", left.head, left.tail)
+		}
+		if right.head >= right.tail {
+			fmt.Printf("wtf2 %d %d\n", right.head, right.tail)
+		}
+		writer.WriteString(svStore.svMap[id].Chromosome + "\t" + strconv.Itoa(left.head) + "\t" + strconv.Itoa(left.tail) + "\n")
+		writer.WriteString(svStore.svMap[id].Chromosome + "\t" + strconv.Itoa(right.head) + "\t" + strconv.Itoa(right.tail) + "\n")
+		if strType == "intdup" {
+			if copy.head >= copy.tail {
+				fmt.Printf("wtf3 %d %d\n", copy.head, copy.tail)
+			}
+			writer.WriteString(svStore.svMap[id].Chromosome + "\t" + strconv.Itoa(copy.head) + "\t" + strconv.Itoa(copy.tail) + "\n")
+		}
+	}
+	writer.Flush()
+}
+
+func simStatistics(simfile string) {
+	f, _ := os.Open(simfile)
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+
+	indel := 0
+	sv1 := 0
+	sv2 := 0
+	sv3 := 0
+	sv4 := 0
+
+	indel_i := 0
+	sv1_i := 0
+	sv2_i := 0
+	sv3_i := 0
+	sv4_i := 0
+
+	inter := 0
+	invert := 0
+
+	if strings.Contains(simfile, "bed") {
+
+		for scanner.Scan() {
+			words := strings.Fields(scanner.Text())
+			e, _ := strconv.Atoi(words[2])
+			s, _ := strconv.Atoi(words[1])
+			len := e - s
+			if len <= 50 {
+				indel++
+			} else if len <= 500 {
+				sv1++
+			} else if len <= 5000 {
+				sv2++
+			} else if len <= 10000 {
+				sv3++
+			} else {
+				sv4++
+			}
+		}
+	} else {
+
+		for scanner.Scan() {
+			words := strings.Fields(scanner.Text())
+			len, _ := strconv.Atoi(words[3])
+			duptype := words[11]
+			if duptype == "tandem" {
+				if len <= 50 {
+					indel++
+				} else if len <= 500 {
+					sv1++
+				} else if len <= 5000 {
+					sv2++
+				} else if len <= 10000 {
+					sv3++
+				} else {
+					sv4++
+				}
+			} else if duptype == "interspersed" || duptype == "inverted" {
+				if len <= 50 {
+					indel_i++
+				} else if len <= 500 {
+					sv1_i++
+				} else if len <= 5000 {
+					sv2_i++
+				} else if len <= 10000 {
+					sv3_i++
+				} else {
+					sv4_i++
+				}
+
+				if duptype == "interspersed" {
+					inter++
+				}
+				if duptype == "inverted" {
+					invert++
+				}
+			}
+		}
+	}
+	fmt.Printf("Tandem\n")
+	fmt.Printf("1-50:\t%d\n50-500:\t%d\n500-5000:\t%d\n5000-10000:\t%d\n>10000:\t%d\n", indel, sv1, sv2, sv3, sv4)
+	fmt.Printf("Interspersed\n")
+	fmt.Printf("1-50:\t%d\n50-500:\t%d\n500-5000:\t%d\n5000-10000:\t%d\n>10000:\t%d\n", indel_i, sv1_i, sv2_i, sv3_i, sv4_i)
+	fmt.Printf("interspersed: %d\ninverted: %d\n", invert, invert)
+}

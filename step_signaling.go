@@ -40,33 +40,69 @@ func isSignaling(record *sam.Record, svType SVType) bool {
 		return false
 	}
 
-	// Read placed before its mate -+ //tandup
-	if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos {
-		return false
-	}
-
-	// Read placed after its mate -+ //tandup
-	if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos {
-		return false
-	}
-
 	// Clipped Alignments Pattern
 	r, _ := regexp.Compile("[1-9][0-9]S")
 
-	if svType == inv {
-
-		// Same direction with mate
-		if flags&sam.Reverse != 0 && flags&sam.MateReverse != 0 { // --
-			return true
-		}
-		if flags&sam.Reverse == 0 && flags&sam.MateReverse == 0 { // ++
-			return true
-		}
-
-		// just split in inv region
+	if svType == all {
+		// split in ci region
 		if r.MatchString(cigar) {
 			return true
 		}
+		if strings.Index(cigar, "H") != -1 {
+			return true
+		}
+	}
+
+	if svType == intdup {
+
+		// split in dup region
+		if r.MatchString(cigar) {
+			return true
+		}
+		// Read placed before/after its mate -+
+		if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos && r.MatchString(cigar) {
+			return true
+		}
+		if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos && r.MatchString(cigar) {
+			return true
+		}
+
+		//if strings.Index(cigar, "H") != -1 {
+		//	return true
+		//}
+	}
+	if svType == tandup {
+		// Read placed before/after its mate -+
+		if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos && r.MatchString(cigar) {
+			return true
+		}
+		if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos && r.MatchString(cigar) {
+			return true
+		}
+
+		// split in dup region
+		if r.MatchString(cigar) {
+			return true
+		}
+	}
+
+	if svType == inv {
+		// Same direction with mate
+		if flags&sam.Reverse != 0 && flags&sam.MateReverse != 0 && r.MatchString(cigar) { // --
+			return true
+		}
+		if flags&sam.Reverse == 0 && flags&sam.MateReverse == 0 && r.MatchString(cigar) { // ++
+			return true
+		}
+
+		// split in inv region
+		if r.MatchString(cigar) {
+			return true
+		}
+		// comment out for alignment option
+		//if strings.Index(cigar, "H") != -1 {
+		//	return true
+		//}
 	}
 
 	if svType == del {
@@ -77,14 +113,22 @@ func isSignaling(record *sam.Record, svType SVType) bool {
 				return true
 			}
 		}
+		if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && r.MatchString(cigar) && r.MatchString(cigar) { // +-
+			return true
+		}
+
+		if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && r.MatchString(cigar) && r.MatchString(cigar) { // +-
+			return true
+		}
+
 		// Just clipped (not mapping too farther than expected)
 		if r.MatchString(cigar) {
 			return true
 		}
 
-		if strings.Index(cigar, "H") != -1 {
-			return true
-		}
+		//if strings.Index(cigar, "H") != -1 {
+		//	return true
+		//}
 	}
 	return false
 }
@@ -162,6 +206,20 @@ func extractSignalingInCI(bamFilePath string, outputBamFilePath string, ciStore 
 	wg.Wait()
 
 }
+func findMatchNum(cigar string) int {
+	j := 0
+	total := 0
+	for i := 0; i < len(cigar); i++ {
+		if cigar[i] == 'M' {
+			num, _ := strconv.Atoi(cigar[j:i])
+			total += num
+			j = i + 1
+		} else if cigar[i] == 'I' || cigar[i] == 'D' {
+			j = i + 1
+		}
+	}
+	return total
+}
 
 func setBreakpointTags(bamFilePath string, outputBamFilePath string, ciStore CIStore) {
 	f, _ := os.Open(bamFilePath)
@@ -198,17 +256,25 @@ func setBreakpointTags(bamFilePath string, outputBamFilePath string, ciStore CIS
 		s := strings.Index(cigar, "S")
 		h := strings.Index(cigar, "H")
 		var val int
+		delflag := false
 
 		if m < s || m < h {
-			m, _ = strconv.Atoi(cigar[0:m])
+			//m, _ = strconv.Atoi(cigar[0:m])
+			m = findMatchNum(cigar)
 			val = m + rec.Pos
+			delflag = true
 		} else {
 			if s != -1 {
-				m, _ = strconv.Atoi(cigar[s+1 : m])
+				//m, _ = strconv.Atoi(cigar[s+1 : m])
+				m = findMatchNum(cigar[s+1 : len(cigar)])
 			} else if h != -1 {
-				m, _ = strconv.Atoi(cigar[h+1 : m])
+				//m, _ = strconv.Atoi(cigar[h+1 : m])
+				m = findMatchNum(cigar[h+1 : len(cigar)])
+			} else {
+				m = 0
 			}
 			val = rec.Pos
+
 		}
 
 		// eliminate insignificant splits
@@ -216,11 +282,22 @@ func setBreakpointTags(bamFilePath string, outputBamFilePath string, ciStore CIS
 			if currentCI.side == leftCI {
 				newAux, _ := sam.NewAux(lbpTag, val)
 				rec.AuxFields = append(rec.AuxFields, newAux)
-			} else {
+			} else if currentCI.side == rightCI {
 				newAux, _ := sam.NewAux(rbpTag, val)
+				rec.AuxFields = append(rec.AuxFields, newAux)
+			} else {
+				newAux, _ := sam.NewAux(copyTag, val)
 				rec.AuxFields = append(rec.AuxFields, newAux)
 			}
 
+			if svStore.svMap[currentCI.svId].Type == "DEL" {
+				if delflag && currentCI.side == rightCI {
+					continue
+				}
+				if !delflag && currentCI.side == leftCI {
+					continue
+				}
+			}
 			bamWriter.Write(rec)
 			rec.AuxFields = rec.AuxFields[:len(rec.AuxFields)-1]
 		}

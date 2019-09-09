@@ -97,24 +97,26 @@ func alignSingleRead(svStore SVStore, ciStore CIStore, ref Genome, rec *sam.Reco
 	result := align(len(read), refL, refR, read, currentSV.Type)
 
 	if (result.identityL >= 0.95 && result.identityR >= 0.95) || (result.identityL == -1 && result.identityR >= 0.95) || (result.identityL >= 0.95 && result.identityR == -1) {
-		cigarL, _ := computeCIGAR(result.aL, result.bL, result.cL)
-		cigarR, rlen := computeCIGAR(result.aR, result.bR, result.cR)
+		/*
+			cigarL, _ := computeCIGAR(result.aL, result.bL, result.cL)
+			cigarR, rlen := computeCIGAR(result.aR, result.bR, result.cR)
 
-		var cigar sam.Cigar
-		svlen := (r.head + result.rbp) - (l.head + result.lbp) - 1
-		if currentSV.Type == "INV" {
-			svlen -= len(read) - rlen
-		}
-		if svlen > 0 {
-			svreg := sam.NewCigarOp(sam.CigarDeletion, svlen)
-			cigar = append(cigarL, svreg)
-			cigar = append(cigar, cigarR...)
-		} else {
-			cigar = append(cigarL, cigarR...)
-		}
+			var cigar sam.Cigar
+			svlen := (r.head + result.rbp) - (l.head + result.lbp) - 1
+			if currentSV.Type == "INV" {
+				svlen -= len(read) - rlen
+			}
+			if svlen > 0 {
+				svreg := sam.NewCigarOp(sam.CigarDeletion, svlen)
+				cigar = append(cigarL, svreg)
+				cigar = append(cigar, cigarR...)
+			} else {
+				cigar = append(cigarL, cigarR...)
+			}
+		*/
 		rec.Pos = result.pos + l.head
 		rec.Ref.SetName(currentSV.Chromosome)
-		rec.Cigar = cigar
+		//rec.Cigar = cigar
 		newAux, _ := sam.NewAux(lbpTag, result.lbp+l.head)
 		rec.AuxFields = append(rec.AuxFields, newAux)
 		newAux, _ = sam.NewAux(rbpTag, result.rbp+r.head)

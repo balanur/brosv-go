@@ -7,8 +7,8 @@ import (
 	"log"
 	"math"
 	"os"
-	//	"os/exec"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/balanur/vcfgo"
@@ -30,17 +30,17 @@ var (
 	help    = flag.Bool("help", false, "display help")
 )
 
-var svTag, lbpTag, rbpTag sam.Tag
+var svTag, lbpTag, rbpTag, copyTag sam.Tag
 var segmentSize, variance int
-var leftCIs, rightCIs map[string]int
+var leftCIs, rightCIs, copyCIs map[string]int
 var ciStore CIStore
 var svStore SVStore
 
 func readVcf(fileName string) (SVStore, CIStore) {
-	return readVcfFiltered(fileName, "")
+	return readVcfFiltered(fileName, "", "")
 }
 
-func readVcfFiltered(fileName string, filter string) (SVStore, CIStore) {
+func readVcfFiltered(fileName string, filter string, samplefilter string) (SVStore, CIStore) {
 	svStore := NewSVStore()
 	ciStore := NewCIStore()
 
@@ -49,6 +49,15 @@ func readVcfFiltered(fileName string, filter string) (SVStore, CIStore) {
 	if err != nil {
 		panic(err)
 	}
+
+	var filter2 string
+	if filter == "tandup" {
+		filter = "DUP"
+		filter2 = "DUP:TANDEM"
+	} else if filter == "intdup" {
+		filter = "DUP"
+		filter2 = "DUP:ISP"
+	}
 	SVcount := 0
 	for {
 		variant := rdr.Read()
@@ -56,7 +65,19 @@ func readVcfFiltered(fileName string, filter string) (SVStore, CIStore) {
 		if variant == nil {
 			break
 		}
-		if !strings.Contains(variant.Id(), filter) {
+
+		svType, _ := variant.Info().Get("SVTYPE")
+		sample, _ := variant.Info().Get("SAMPLE")
+
+		if !strings.Contains(svType.(string), filter) || !strings.Contains(variant.Alt()[0], filter2) {
+			continue
+		}
+
+		//if strings.Contains(variant.Alt()[0], "INS") {
+		//	continue
+		//}
+
+		if sample != nil && !strings.Contains(sample.(string), samplefilter) {
 			continue
 		}
 
@@ -65,14 +86,20 @@ func readVcfFiltered(fileName string, filter string) (SVStore, CIStore) {
 		endPosition, _ := variant.Info().Get("END")
 		tempSV.End = endPosition.(int)
 		tempSV.Chromosome = variant.Chromosome
-		svType, _ := variant.Info().Get("SVTYPE")
-		tempSV.Type = svType.(string)
-		tempSV.id = variant.Id()
 
-		svsize := tempSV.End - tempSV.Start
-		if svsize > 10000 {
+		if tempSV.Chromosome == "MT" {
 			continue
 		}
+
+		tempSV.Type = svType.(string)
+		tempSV.id = strings.TrimSpace(variant.Id())
+
+		svsize := tempSV.End - tempSV.Start
+
+		//if svsize > 10000 {
+		//	continue
+		//}
+
 		svStore.add(tempSV)
 		SVcount++
 
@@ -80,6 +107,11 @@ func readVcfFiltered(fileName string, filter string) (SVStore, CIStore) {
 		if ciPos, err := variant.Info().Get("CIPOS"); err == nil {
 			leftInterval.head = tempSV.Start + ciPos.([]int)[0]
 			leftInterval.tail = tempSV.Start + ciPos.([]int)[1]
+			leftInterval.svId = tempSV.id
+			leftInterval.side = leftCI
+		} else {
+			leftInterval.head = tempSV.Start
+			leftInterval.tail = tempSV.Start
 			leftInterval.svId = tempSV.id
 			leftInterval.side = leftCI
 		}
@@ -90,13 +122,53 @@ func readVcfFiltered(fileName string, filter string) (SVStore, CIStore) {
 			rightInterval.tail = tempSV.End + ciEnd.([]int)[1]
 			rightInterval.svId = tempSV.id
 			rightInterval.side = rightCI
+		} else {
+			rightInterval.head = tempSV.End
+			rightInterval.tail = tempSV.End
+			rightInterval.svId = tempSV.id
+			rightInterval.side = rightCI
 		}
 
-		// All SVs (exact or not) taken
-		leftInterval.head -= (segmentSize + 100)
+		if svsize < segmentSize+100 {
+			leftInterval.tail += svsize / 2
+			rightInterval.head -= svsize / 2
+		} else {
+			leftInterval.tail += (segmentSize + 100)
+			rightInterval.head -= (segmentSize + 100)
+		}
+		//leftInterval.tail += 100
+		//rightInterval.head -= 100
+
+		leftInterval.head -= 100
+		rightInterval.tail += 100
+
+		if leftInterval.head < 0 {
+			leftInterval.head = 1
+		}
+		if rightInterval.head < 0 {
+			rightInterval.head = 1
+		}
+
 		ciStore.add(svStore, leftInterval)
-		rightInterval.tail += (segmentSize + 100)
 		ciStore.add(svStore, rightInterval)
+
+		var copyInterval Interval
+		if filter2 == "DUP:ISP" {
+			if strings.Contains(variant.Alt()[0], "DUP:ISP") {
+				start, _ := variant.Info().Get("POS2")
+				tempSV.copyPos, _ = strconv.Atoi(start.(string))
+				copyInterval.head = tempSV.copyPos - (segmentSize + 100)
+				copyInterval.tail = tempSV.copyPos + (segmentSize + 100)
+				copyInterval.svId = tempSV.id
+				copyInterval.side = copyCI
+
+				if copyInterval.head < 0 {
+					copyInterval.head = 1
+				}
+
+				ciStore.add(svStore, copyInterval)
+			}
+		}
 
 	}
 	fmt.Printf("Number of CIs / SVs %d / %d\n", len(ciStore.ciList), len(svStore.svMap))
@@ -126,6 +198,13 @@ func findAverageSegmentSize(bamFilePath string, thr int, N int) (int, int) {
 			i++
 		}
 	}
+	f.Close()
+	f, _ = os.Open(bamFilePath)
+	defer f.Close()
+
+	bamReader, _ = bam.NewReader(f, *threads)
+	defer bamReader.Close()
+
 	mean := sum / i
 	i = 0
 	sum = 0
@@ -149,12 +228,15 @@ func findAverageSegmentSize(bamFilePath string, thr int, N int) (int, int) {
 func linkLeftRightCIs(svStore SVStore, ciStore CIStore) {
 	leftCIs = make(map[string]int)
 	rightCIs = make(map[string]int)
+	copyCIs = make(map[string]int)
 
 	for i, interval := range ciStore.ciList {
 		if interval.side == leftCI {
 			leftCIs[interval.svId] = i
-		} else {
+		} else if interval.side == rightCI {
 			rightCIs[interval.svId] = i
+		} else {
+			copyCIs[interval.svId] = i
 		}
 	}
 }
@@ -162,17 +244,19 @@ func linkLeftRightCIs(svStore SVStore, ciStore CIStore) {
 // Organizer functions for each step of the workflow
 func extractSignalingReadsMode(svType SVType) {
 	fmt.Printf("Running in mode 1 - Signaling read extraction\n")
-	//extractSignalingInCI(*bamFile, path.Join(*workdir, "cluster.bam"), ciStore, svType)
+	extractSignalingInCI(*bamFile, path.Join(*workdir, "cluster.bam"), ciStore, svType)
 	setBreakpointTags(path.Join(*workdir, "cluster.bam"), *workdir, ciStore)
 }
 
-func votingMode(strType string) {
-	fmt.Printf("Running in mode 2 - Breakpoint Voting \n")
+func votingMode(strType string, sample string) {
+	//fmt.Printf("Running in mode 2 - Breakpoint Voting \n")
 	//cmd := exec.Command("samtools", "sort", "-t", "SV", path.Join(*workdir, "cluster_withbp.bam"), "-o", path.Join(*workdir, "sorted.bam"))
 	//cmd.Run()
 	//calculateSplitReadSupport(path.Join(*workdir, "sorted.bam"), path.Join(*workdir, "votes.txt"), ciStore, svStore)
-	//writeRefinedVcf(path.Join(*workdir, "votes.txt"), path.Join(*workdir, "refined.vcf"), ciStore, svStore)
-	compareWithTruth(path.Join(*workdir, "refined.vcf"), "data/true_cnv_1200.txt", strType)
+	//writeRefinedVcf(path.Join(*workdir, "votes.txt"), path.Join(*workdir, "refined.vcf"), *refFile, ciStore, svStore)
+	//compareWithTruth(path.Join(*workdir, "refined.vcf"), "data/real/gnomAD_calls.vcf", strType, sample, ciStore)
+	compareWithTruth(path.Join(*workdir, "refined.vcf"), "data/simu/del_true_all.bed", strType, sample, ciStore)
+
 }
 
 func main() {
@@ -182,31 +266,54 @@ func main() {
 		os.Exit(0)
 	}
 
+	//simStatistics("data/new/true_chr1")
+
 	svTag = sam.NewTag("SV")
 	lbpTag = sam.NewTag("LBP")
 	rbpTag = sam.NewTag("RBP")
+	copyTag = sam.NewTag("CPY")
 
 	svType := del
+
 	var strType string
 	if svType == del {
-		strType = "del"
+		strType = "DEL"
 	} else if svType == inv {
-		strType = "inv"
+		strType = "INV"
+	} else if svType == ins {
+		strType = "INS"
+	} else if svType == tandup {
+		strType = "tandup"
+	} else if svType == intdup {
+		strType = "intdup"
 	}
 
 	segmentSize, variance = findAverageSegmentSize(*bamFile, 1000, 1000000)
 	fmt.Printf("Segment size = %d  Variance = %d\n", segmentSize, variance)
-	svStore, ciStore = readVcfFiltered(*vcfFile, strType)
+	if svType == all {
+		svStore, ciStore = readVcf(*vcfFile)
+	} else {
+		svStore, ciStore = readVcfFiltered(*vcfFile, strType, "")
+	}
 	linkLeftRightCIs(svStore, ciStore)
+
+	//writeCIstobed(path.Join(*workdir, "cifile.bed"), ciStore, strType)
+	//return
+
+	//compareWithTruth("data/simu/lumpy_30x.vcf", "data/simu/del_true_all.bed", "del", "", ciStore)
+	//return
 
 	switch *mode {
 	case 1:
 		extractSignalingReadsMode(svType)
 	case 2:
-		votingMode(strType)
+		votingMode(strType, "")
+		//votingMode("tandup", "")
+	case 3:
+		alignmentMode()
 	default:
 		extractSignalingReadsMode(svType)
-		votingMode(strType)
+		votingMode(strType, "")
 	}
 
 }

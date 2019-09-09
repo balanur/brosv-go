@@ -6,6 +6,7 @@ type SV struct {
 	Start      int
 	End        int
 	Type       string
+	copyPos    int
 }
 
 type SVStore struct {
@@ -87,6 +88,7 @@ type Side int
 const (
 	leftCI Side = iota + 1
 	rightCI
+	copyCI
 )
 
 // SV Type
@@ -96,7 +98,10 @@ const (
 	none SVType = iota
 	del
 	inv
+	ins
 	tandup
+	intdup
+	all
 )
 
 // FaiEntry is a line from fasta index
