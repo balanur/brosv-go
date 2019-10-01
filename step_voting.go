@@ -91,11 +91,16 @@ func calculateSplitReadSupport(bamFilePath string, outfile string, ciStore CISto
 		}
 
 		sort.Slice(list, func(i, j int) bool { return list[i].VoteNum > list[j].VoteNum })
+
 		for _, val := range list {
 			writer.WriteString(strconv.Itoa(val.Pos) + " " + strconv.Itoa(val.VoteNum) + "\n")
 		}
+		if len(list) < 2 {
+			continue
+		}
 	}
 	writer.Flush()
+
 }
 
 func writeRefinedVcf(voteFile string, outfilePath string, refFilePath string, ciStore CIStore, svStore SVStore) {
@@ -151,9 +156,6 @@ func writeRefinedVcf(voteFile string, outfilePath string, refFilePath string, ci
 
 	ref := readReference(refFilePath)
 
-	//leftlimit := 0
-	//rightlimit := 0
-
 	for svId := range leftbp {
 		_sv := svStore.get(svId)
 
@@ -175,17 +177,17 @@ func writeRefinedVcf(voteFile string, outfilePath string, refFilePath string, ci
 		}
 	}
 	writer.Flush()
-
-	//fmt.Printf("LEFT supported : %d\nRIGHT supported: %d\n", leftlimit, rightlimit)
 }
 
 func getREFALT(ref Genome, sv SV, start int, end int) (string, string) {
 	if end <= start {
 		return ".", "."
 	}
+	if start < 0 {
+		return ".", "."
+	}
 
 	REF := ref.getChr(sv.Chromosome).content[start:end]
-	//fmt.Printf("%d\n", len(REF))
 
 	if sv.Type == "DEL" {
 		return REF[0:1], "<DEL>"
@@ -209,6 +211,13 @@ func sortcond(x SV, y SV) bool {
 	} else {
 		return false
 	}
+}
+
+func AbsInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func compareWithTruth(resultfile string, truthfile string, strType string, strSample string, ciStore CIStore) {
@@ -287,23 +296,6 @@ func compareWithTruth(resultfile string, truthfile string, strType string, strSa
 
 	sort.Slice(truth, func(i, j int) bool { return sortcond(truth[i], truth[j]) })
 	fmt.Printf("Truth len %d \n", len(truth))
-	//redundancy check
-	/*	var temp []SV
-		temp = append(temp, truth[0])
-
-		for i := 1; i < len(truth); i++ {
-			if truth[i].Chromosome != truth[i-1].Chromosome {
-				temp = append(temp, truth[i])
-			} else if truth[i-1].End < truth[i].Start {
-				temp = append(temp, truth[i])
-			} else {
-				temp[len(temp)-1].End = truth[i].End
-			}
-		}
-		truth = temp
-		fmt.Printf("Truth len %d (no intersection)\n", len(truth))*/
-
-	verified := make(map[string]int)
 
 	for scanner.Scan() {
 		words := strings.Fields(scanner.Text())
@@ -352,33 +344,65 @@ func compareWithTruth(resultfile string, truthfile string, strType string, strSa
 	for i := 1; i < len(result); i++ {
 		if result[i].Chromosome != result[i-1].Chromosome {
 			temp2 = append(temp2, result[i])
-		} else if result[i-1].End < result[i].Start {
+		} else if result[i-1].End < result[i].Start && result[i-1].Start != result[i].Start && result[i-1].End != result[i].End {
 			temp2 = append(temp2, result[i])
 		}
 	}
 	result = temp2
 	fmt.Printf("Result len %d (no redundancy)\n", len(result))
 
-	//for i := 0; i < len(result); i++ {
-	//	fmt.Printf("%s %d %d\n", result[i].Chromosome, result[i].Start, result[i].End)
-	//}
-
 	//performanceForCIs(truth, result)
 	//return
 
+	var forfig []string
 	// compare
 	i := 0
 	j := 0
-	lTRUE := 0
-	rTRUE := 0
 	cTRUE := 0
-	FPs := make(map[string]SV)
-	FNs := make(map[int]SV)
-	TPs := make(map[string]SV)
-	TPs2 := make(map[int]SV)
+	TPl := 0
+	TPr := 0
+	FP := 0
+	FN := 0
+	TP2 := 0
+	for i = 0; i < len(result); i++ {
+		flag := false
+		for j = 0; j < len(truth); j++ {
+			if result[i].Chromosome == truth[j].Chromosome {
+				if AbsInt(result[i].Start-truth[j].Start) <= *margin {
+					forfig = append(forfig, result[i].id)
+					TPl++
+					flag = true
+				}
+				if AbsInt(result[i].End-truth[j].End) <= *margin {
+					TPr++
+					flag = true
+				}
+			}
+		}
+		if !flag {
+			FP++
+		}
+	}
+	for j = 0; j < len(truth); j++ {
+		flag := false
+		for i = 0; i < len(result); i++ {
+			if result[i].Chromosome == truth[j].Chromosome {
+				if AbsInt(result[i].Start-truth[j].Start) <= *margin || AbsInt(result[i].End-truth[j].End) <= *margin {
+					TP2++
+					flag = true
+					break
+				}
+			}
+		}
+		if !flag {
+			FN++
+		}
+	}
+
+	fmt.Printf("TPl %d  TPr %d FP %d FN %d\n", TPl, TPr, FP, FN)
 
 	// left breakpoint
-	for i = 0; i < len(result) && j < len(truth); {
+	/*for i = 0; i < len(result) && j < len(truth); {
 		if result[i].Chromosome > truth[j].Chromosome {
 			FNs[truth[j].Start] = truth[j]
 			j++
@@ -433,11 +457,11 @@ func compareWithTruth(resultfile string, truthfile string, strType string, strSa
 				i++
 			} else {
 				if _, ok := FPs[result[i].id]; ok {
-					fmt.Printf("FP %d %d , %d %d\n", truth[j].Start, truth[j].End, result[i].Start, result[i].End)
+					//fmt.Printf("FP %d %d , %d %d\n", truth[j].Start, truth[j].End, result[i].Start, result[i].End)
 					delete(FPs, result[i].id)
 				}
 				if _, ok := FNs[truth[j].Start]; ok {
-					fmt.Printf("FN %d %d , %d %d\n", truth[j].Start, truth[j].End, result[i].Start, result[i].End)
+					//fmt.Printf("FN %d %d , %d %d\n", truth[j].Start, truth[j].End, result[i].Start, result[i].End)
 					delete(FNs, truth[j].Start)
 				}
 				TPs[result[i].id] = result[i]
@@ -459,6 +483,7 @@ func compareWithTruth(resultfile string, truthfile string, strType string, strSa
 	}
 
 	fmt.Printf("TP: %d FP: %d FN: %d\n", len(TPs2), len(FPs), len(FNs))
+	*/
 
 	if filter == "interspersed" {
 		// copy loci for interspersed
@@ -474,7 +499,7 @@ func compareWithTruth(resultfile string, truthfile string, strType string, strSa
 				} else if truth[j].copyPos-result[i].copyPos > *margin {
 					i++
 				} else {
-					verified[result[i].id] = 1
+					//verified[result[i].id] = 1
 					cTRUE++
 					i++
 				}
@@ -482,32 +507,7 @@ func compareWithTruth(resultfile string, truthfile string, strType string, strSa
 		}
 	}
 
-	//writeVerifiedVCF(verified, resultfile, path.Join(*workdir, "verified.vcf"))
-	fmt.Printf("LEFT bp found %d\nRIGHT bp found %d\nCopy bp found %d\n", lTRUE, rTRUE, cTRUE)
-}
-
-func writeVerifiedVCF(verified map[string]int, resultfile string, outfilePath string) {
-	f, _ := os.Open(resultfile)
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-
-	g, _ := os.Create(outfilePath)
-	defer g.Close()
-	writer := bufio.NewWriter(g)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		words := strings.Fields(line)
-		if words[0][0] == '#' {
-			continue
-		}
-
-		_svid := words[2]
-		if verified[_svid] > 0 {
-			writer.WriteString(line + "\n")
-		}
-	}
-	writer.Flush()
+	fmt.Printf("Copy bp found %d\n", cTRUE)
 }
 
 // tp, fp, fn
@@ -589,10 +589,6 @@ func performanceForCIs(truth []SV, result []SV) {
 	for ; j < len(truth); j++ {
 		FNs[truth[j].Start] = truth[j]
 	}
-
-	//for k, _ := range FPs {
-	//	fmt.Printf("%s %d %d\n", FPs[k].id, FPs[k].Start, FPs[k].End)
-	//}
 
 	fmt.Printf("TP: %d FP: %d FN: %d\n", len(TPs), len(FPs), len(FNs))
 }

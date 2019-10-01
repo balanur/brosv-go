@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"os/exec"
 	"path"
 	"strconv"
 	"strings"
@@ -73,10 +74,6 @@ func readVcfFiltered(fileName string, filter string, samplefilter string) (SVSto
 			continue
 		}
 
-		//if strings.Contains(variant.Alt()[0], "INS") {
-		//	continue
-		//}
-
 		if sample != nil && !strings.Contains(sample.(string), samplefilter) {
 			continue
 		}
@@ -95,10 +92,6 @@ func readVcfFiltered(fileName string, filter string, samplefilter string) (SVSto
 		tempSV.id = strings.TrimSpace(variant.Id())
 
 		svsize := tempSV.End - tempSV.Start
-
-		//if svsize > 10000 {
-		//	continue
-		//}
 
 		svStore.add(tempSV)
 		SVcount++
@@ -136,9 +129,6 @@ func readVcfFiltered(fileName string, filter string, samplefilter string) (SVSto
 			leftInterval.tail += (segmentSize + 100)
 			rightInterval.head -= (segmentSize + 100)
 		}
-		//leftInterval.tail += 100
-		//rightInterval.head -= 100
-
 		leftInterval.head -= 100
 		rightInterval.tail += 100
 
@@ -148,7 +138,6 @@ func readVcfFiltered(fileName string, filter string, samplefilter string) (SVSto
 		if rightInterval.head < 0 {
 			rightInterval.head = 1
 		}
-
 		ciStore.add(svStore, leftInterval)
 		ciStore.add(svStore, rightInterval)
 
@@ -249,12 +238,11 @@ func extractSignalingReadsMode(svType SVType) {
 }
 
 func votingMode(strType string, sample string) {
-	//fmt.Printf("Running in mode 2 - Breakpoint Voting \n")
-	//cmd := exec.Command("samtools", "sort", "-t", "SV", path.Join(*workdir, "cluster_withbp.bam"), "-o", path.Join(*workdir, "sorted.bam"))
-	//cmd.Run()
-	//calculateSplitReadSupport(path.Join(*workdir, "sorted.bam"), path.Join(*workdir, "votes.txt"), ciStore, svStore)
-	//writeRefinedVcf(path.Join(*workdir, "votes.txt"), path.Join(*workdir, "refined.vcf"), *refFile, ciStore, svStore)
-	//compareWithTruth(path.Join(*workdir, "refined.vcf"), "data/real/gnomAD_calls.vcf", strType, sample, ciStore)
+	fmt.Printf("Running in mode 2 - Breakpoint Voting \n")
+	cmd := exec.Command("samtools", "sort", "-t", "SV", path.Join(*workdir, "cluster_withbp.bam"), "-o", path.Join(*workdir, "sorted.bam"))
+	cmd.Run()
+	calculateSplitReadSupport(path.Join(*workdir, "sorted.bam"), path.Join(*workdir, "votes.txt"), ciStore, svStore)
+	writeRefinedVcf(path.Join(*workdir, "votes.txt"), path.Join(*workdir, "refined.vcf"), *refFile, ciStore, svStore)
 	compareWithTruth(path.Join(*workdir, "refined.vcf"), "data/simu/del_true_all.bed", strType, sample, ciStore)
 
 }
@@ -265,8 +253,6 @@ func main() {
 		flag.Usage()
 		os.Exit(0)
 	}
-
-	//simStatistics("data/new/true_chr1")
 
 	svTag = sam.NewTag("SV")
 	lbpTag = sam.NewTag("LBP")
@@ -297,18 +283,18 @@ func main() {
 	}
 	linkLeftRightCIs(svStore, ciStore)
 
-	//writeCIstobed(path.Join(*workdir, "cifile.bed"), ciStore, strType)
-	//return
-
-	//compareWithTruth("data/simu/lumpy_30x.vcf", "data/simu/del_true_all.bed", "del", "", ciStore)
-	//return
+	/*
+		writeCIstobed(path.Join(*workdir, "cifile.csv"), ciStore, strType)
+		return
+		compareWithTruth("data/simu/lumpy_30x.vcf", "data/simu/del_true_all.bed", "del", "", ciStore)
+		return
+	*/
 
 	switch *mode {
 	case 1:
 		extractSignalingReadsMode(svType)
 	case 2:
 		votingMode(strType, "")
-		//votingMode("tandup", "")
 	case 3:
 		alignmentMode()
 	default:

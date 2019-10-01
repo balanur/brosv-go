@@ -318,8 +318,9 @@ func writeCIstobed(cifile string, ciStore CIStore, strType string) {
 		if right.head >= right.tail {
 			fmt.Printf("wtf2 %d %d\n", right.head, right.tail)
 		}
-		writer.WriteString(svStore.svMap[id].Chromosome + "\t" + strconv.Itoa(left.head) + "\t" + strconv.Itoa(left.tail) + "\n")
-		writer.WriteString(svStore.svMap[id].Chromosome + "\t" + strconv.Itoa(right.head) + "\t" + strconv.Itoa(right.tail) + "\n")
+		//writer.WriteString(svStore.svMap[id].Chromosome + "\t" + strconv.Itoa(left.head) + "\t" + strconv.Itoa(left.tail) + "\n")
+		writer.WriteString(svStore.svMap[id].Chromosome + "," + strconv.Itoa(left.tail-left.head) + "," + strconv.Itoa(right.tail-right.head) + "\n")
+		//writer.WriteString(svStore.svMap[id].Chromosome + "\t" + strconv.Itoa(right.head) + "\t" + strconv.Itoa(right.tail) + "\n")
 		if strType == "intdup" {
 			if copy.head >= copy.tail {
 				fmt.Printf("wtf3 %d %d\n", copy.head, copy.tail)

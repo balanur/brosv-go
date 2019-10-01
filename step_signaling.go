@@ -42,10 +42,11 @@ func isSignaling(record *sam.Record, svType SVType) bool {
 
 	// Clipped Alignments Pattern
 	r, _ := regexp.Compile("[1-9][0-9]S")
+	r2, _ := regexp.Compile("[1-9][0-9]H")
 
 	if svType == all {
 		// split in ci region
-		if r.MatchString(cigar) {
+		if r.MatchString(cigar) || r2.MatchString(cigar) {
 			return true
 		}
 		if strings.Index(cigar, "H") != -1 {
@@ -54,81 +55,64 @@ func isSignaling(record *sam.Record, svType SVType) bool {
 	}
 
 	if svType == intdup {
-
-		// split in dup region
-		if r.MatchString(cigar) {
-			return true
-		}
 		// Read placed before/after its mate -+
-		if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos && r.MatchString(cigar) {
-			return true
+		if r.MatchString(cigar) || r2.MatchString(cigar) { // split in dup region
+			if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos {
+				return true
+			}
+			if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos {
+				return true
+			}
 		}
-		if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos && r.MatchString(cigar) {
-			return true
-		}
-
-		//if strings.Index(cigar, "H") != -1 {
-		//	return true
-		//}
 	}
 	if svType == tandup {
 		// Read placed before/after its mate -+
-		if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos && r.MatchString(cigar) {
-			return true
-		}
-		if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos && r.MatchString(cigar) {
-			return true
-		}
-
-		// split in dup region
-		if r.MatchString(cigar) {
-			return true
+		if r.MatchString(cigar) || r2.MatchString(cigar) { // split in dup region
+			if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && pos <= matePos {
+				return true
+			}
+			if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && pos > matePos {
+				return true
+			}
 		}
 	}
 
 	if svType == inv {
 		// Same direction with mate
-		if flags&sam.Reverse != 0 && flags&sam.MateReverse != 0 && r.MatchString(cigar) { // --
-			return true
+		if r.MatchString(cigar) || r2.MatchString(cigar) { // split in inv region
+			if flags&sam.Reverse != 0 && flags&sam.MateReverse != 0 && r.MatchString(cigar) { // --
+				return true
+			}
+			if flags&sam.Reverse == 0 && flags&sam.MateReverse == 0 && r.MatchString(cigar) { // ++
+				return true
+			}
 		}
-		if flags&sam.Reverse == 0 && flags&sam.MateReverse == 0 && r.MatchString(cigar) { // ++
-			return true
-		}
-
-		// split in inv region
-		if r.MatchString(cigar) {
-			return true
-		}
-		// comment out for alignment option
-		//if strings.Index(cigar, "H") != -1 {
-		//	return true
-		//}
 	}
 
 	if svType == del {
 		// Insert size (pairs mapped too closer or farther than expected)
-		max := float64(segmentSize + 3*variance)
-		if math.Abs(float64(pos-matePos)) > max {
-			if r.MatchString(cigar) {
+
+		if r.MatchString(cigar) || r2.MatchString(cigar) { // split in del region
+			max := float64(segmentSize + 3*variance)
+			if math.Abs(float64(pos-matePos)) > max {
+
+				return true
+
+			}
+			if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 { // +-
+				return true
+			}
+
+			if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 { // +-
 				return true
 			}
 		}
-		if flags&sam.Reverse != 0 && flags&sam.MateReverse == 0 && r.MatchString(cigar) && r.MatchString(cigar) { // +-
-			return true
-		}
-
-		if flags&sam.Reverse == 0 && flags&sam.MateReverse != 0 && r.MatchString(cigar) && r.MatchString(cigar) { // +-
-			return true
-		}
 
 		// Just clipped (not mapping too farther than expected)
-		if r.MatchString(cigar) {
+		if r.MatchString(cigar) || r2.MatchString(cigar) {
 			return true
 		}
 
-		//if strings.Index(cigar, "H") != -1 {
-		//	return true
-		//}
 	}
 	return false
 }
@@ -259,16 +243,13 @@ func setBreakpointTags(bamFilePath string, outputBamFilePath string, ciStore CIS
 		delflag := false
 
 		if m < s || m < h {
-			//m, _ = strconv.Atoi(cigar[0:m])
 			m = findMatchNum(cigar)
 			val = m + rec.Pos
 			delflag = true
 		} else {
 			if s != -1 {
-				//m, _ = strconv.Atoi(cigar[s+1 : m])
 				m = findMatchNum(cigar[s+1 : len(cigar)])
 			} else if h != -1 {
-				//m, _ = strconv.Atoi(cigar[h+1 : m])
 				m = findMatchNum(cigar[h+1 : len(cigar)])
 			} else {
 				m = 0
